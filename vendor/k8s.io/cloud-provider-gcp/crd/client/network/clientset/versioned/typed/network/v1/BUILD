@@ -13,6 +13,7 @@ go_library(
         "networkinterfacelist.go",
         "networklist.go",
     ],
+    importmap = "k8s.io/cloud-provider-gcp/vendor/k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned/typed/network/v1",
     importpath = "k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned/typed/network/v1",
     visibility = ["//visibility:public"],
     deps = [

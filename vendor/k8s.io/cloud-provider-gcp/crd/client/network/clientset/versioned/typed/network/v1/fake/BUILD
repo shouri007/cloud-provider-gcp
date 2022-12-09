@@ -12,6 +12,7 @@ go_library(
         "fake_networkinterfacelist.go",
         "fake_networklist.go",
     ],
+    importmap = "k8s.io/cloud-provider-gcp/vendor/k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned/typed/network/v1/fake",
     importpath = "k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned/typed/network/v1/fake",
     visibility = ["//visibility:public"],
     deps = [

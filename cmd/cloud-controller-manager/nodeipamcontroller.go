@@ -30,6 +30,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cloudprovider "k8s.io/cloud-provider"
 	nodeipamcontrolleroptions "k8s.io/cloud-provider-gcp/cmd/cloud-controller-manager/options"
+	networkclientset "k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned"
 	nodeipamcontroller "k8s.io/cloud-provider-gcp/pkg/controller/nodeipam"
 	nodeipamconfig "k8s.io/cloud-provider-gcp/pkg/controller/nodeipam/config"
 	"k8s.io/cloud-provider-gcp/pkg/controller/nodeipam/ipam"
@@ -146,10 +147,17 @@ func startNodeIpamController(ccmConfig *cloudcontrollerconfig.CompletedConfig, n
 	// get list of node cidr mask sizes
 	nodeCIDRMaskSizes := getNodeCIDRMaskSizes(clusterCIDRs, nodeCIDRMaskSizeIPv4, nodeCIDRMaskSizeIPv6)
 
+	kubeConfig := ccmConfig.Complete().Kubeconfig
+	kubeConfig.ContentType = "application/json" // required to serialize Networks to json
+	networkClient, err := networkclientset.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, false, err
+	}
 	nodeIpamController, err := nodeipamcontroller.NewNodeIpamController(
 		ctx.InformerFactory.Core().V1().Nodes(),
 		cloud,
 		ctx.ClientBuilder.ClientOrDie("node-controller"),
+		networkClient,
 		clusterCIDRs,
 		serviceCIDR,
 		secondaryServiceCIDR,

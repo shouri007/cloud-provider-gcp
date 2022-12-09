@@ -43,6 +43,8 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	cloudprovider "k8s.io/cloud-provider"
+	networkv1 "k8s.io/cloud-provider-gcp/crd/apis/network/v1"
+	networkclientset "k8s.io/cloud-provider-gcp/crd/client/network/clientset/versioned"
 	nodeutil "k8s.io/cloud-provider-gcp/pkg/util"
 	utilnode "k8s.io/cloud-provider-gcp/pkg/util/node"
 	utiltaints "k8s.io/cloud-provider-gcp/pkg/util/taints"
@@ -60,8 +62,9 @@ type nodeProcessingInfo struct {
 // deallocation is delegated to the external provider, and the controller
 // merely takes the assignment and updates the node spec.
 type cloudCIDRAllocator struct {
-	client clientset.Interface
-	cloud  *gce.Cloud
+	client        clientset.Interface
+	cloud         *gce.Cloud
+	networkClient networkclientset.Interface
 
 	// nodeLister is able to list/get nodes and is populated by the shared informer passed to
 	// NewCloudCIDRAllocator.
@@ -84,7 +87,7 @@ type cloudCIDRAllocator struct {
 var _ CIDRAllocator = (*cloudCIDRAllocator)(nil)
 
 // NewCloudCIDRAllocator creates a new cloud CIDR allocator.
-func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Interface, nodeInformer informers.NodeInformer) (CIDRAllocator, error) {
+func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Interface, networkClient networkclientset.Interface, nodeInformer informers.NodeInformer) (CIDRAllocator, error) {
 	if client == nil {
 		klog.Fatalf("kubeClient is nil when starting NodeController")
 	}
@@ -100,9 +103,9 @@ func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Inter
 		err := fmt.Errorf("cloudCIDRAllocator does not support %v provider", cloud.ProviderName())
 		return nil, err
 	}
-
 	ca := &cloudCIDRAllocator{
 		client:            client,
+		networkClient:     networkClient,
 		cloud:             gceCloud,
 		nodeLister:        nodeInformer.Lister(),
 		nodesSynced:       nodeInformer.Informer().HasSynced,
@@ -255,11 +258,32 @@ func (ca *cloudCIDRAllocator) updateCIDRAllocation(nodeName string) error {
 	if node.Spec.ProviderID == "" {
 		return fmt.Errorf("node %s doesn't have providerID", nodeName)
 	}
-
-	cidrStrings, err := ca.cloud.AliasRangesByProviderID(node.Spec.ProviderID)
+	// fetch gce instance
+	instance, err := ca.cloud.InstanceByProviderID(node.Spec.ProviderID)
 	if err != nil {
 		nodeutil.RecordNodeStatusChange(ca.recorder, node, "CIDRNotAvailable")
-		return fmt.Errorf("failed to get cidr(s) from provider: %v", err)
+		return fmt.Errorf("failed to get instance from provider: %v", err)
+	}
+
+	cidrStrings := make([]string, 0)
+	var northInterfaces networkv1.NorthInterfacesAnnotation
+	var additionalNodeNetworks networkv1.MultiNetworkAnnotation
+
+	if len(instance.NetworkInterfaces) == 0 || (len(instance.NetworkInterfaces) == 1 && len(instance.NetworkInterfaces[0].AliasIpRanges) == 0) {
+		nodeutil.RecordNodeStatusChange(ca.recorder, node, "CIDRNotAvailable")
+		return fmt.Errorf("failed to allocate cidr: Node %v has no ranges from which CIDRs can be allocated", node.Name)
+	}
+	// nodes in clusters WITHOUT multi-networking are expected to have only 1 network-interface with 1 alias IP range.
+	if len(instance.NetworkInterfaces) == 1 && len(instance.NetworkInterfaces[0].AliasIpRanges) == 1 {
+		cidrStrings = append(cidrStrings, instance.NetworkInterfaces[0].AliasIpRanges[0].IpCidrRange)
+		cidrStrings = ca.cloud.AccommodateIPV6Addresses(cidrStrings, instance.NetworkInterfaces[0], node.Spec.ProviderID)
+	} else {
+		// multi-networking enabled clusters
+		cidrStrings, northInterfaces, additionalNodeNetworks, err = ca.PerformMultiNetworkCIDRAllocation(node, instance.NetworkInterfaces)
+		if err != nil {
+			nodeutil.RecordNodeStatusChange(ca.recorder, node, "CIDRNotAvailable")
+			return fmt.Errorf("failed to get cidr(s) from provider: %v", err)
+		}
 	}
 	if len(cidrStrings) == 0 {
 		nodeutil.RecordNodeStatusChange(ca.recorder, node, "CIDRNotAvailable")
@@ -302,6 +326,9 @@ func (ca *cloudCIDRAllocator) updateCIDRAllocation(nodeName string) error {
 		return err
 	}
 
+	if northInterfaces != nil || additionalNodeNetworks != nil {
+		// TODO: perform IP capacity and annotation updates
+	}
 	err = utilnode.SetNodeCondition(ca.client, types.NodeName(node.Name), v1.NodeCondition{
 		Type:               v1.NodeNetworkUnavailable,
 		Status:             v1.ConditionFalse,

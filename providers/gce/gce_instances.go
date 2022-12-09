@@ -551,17 +551,22 @@ func (g *Cloud) AliasRangesByProviderID(providerID string) (cidrs []string, err 
 		for _, r := range networkInterface.AliasIpRanges {
 			cidrs = append(cidrs, r.IpCidrRange)
 		}
-		ipv6Addr := getIPV6AddressFromInterface(networkInterface)
-		if ipv6Addr != "" {
-			// The podCIDR range is the first /112 subrange from the /96 assigned to
-			// the node
-			ipv6PodCIDR := fmt.Sprintf("%s/112", ipv6Addr)
-			cidrs = append(cidrs, ipv6PodCIDR)
-		} else {
-			klog.Infof("No IPv6 addresses found for %s", providerID)
-		}
+		cidrs = g.AccommodateIPV6Addresses(cidrs, networkInterface, providerID)
 	}
 	return
+}
+
+func (g *Cloud) AccommodateIPV6Addresses(cidrs []string, networkInterface *compute.NetworkInterface, providerID string) []string {
+	ipv6Addr := getIPV6AddressFromInterface(networkInterface)
+	if ipv6Addr != "" {
+		// The podCIDR range is the first /112 subrange from the /96 assigned to
+		// the node
+		ipv6PodCIDR := fmt.Sprintf("%s/112", ipv6Addr)
+		cidrs = append(cidrs, ipv6PodCIDR)
+	} else {
+		klog.Infof("No IPv6 addresses found for %s", providerID)
+	}
+	return cidrs
 }
 
 // AddAliasToInstanceByProviderID adds an alias to the given instance from the named
